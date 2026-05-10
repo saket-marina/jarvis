@@ -8,10 +8,14 @@ import json
 import boto3
 
 MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the AI assistant built by Tony Stark. 
-You are highly intelligent, efficient, and slightly dry in humor. You address the user as "Boss" occasionally.
-Keep responses concise — you are a voice assistant, so avoid long lists or markdown formatting.
-Speak in plain sentences. Be direct and helpful."""
+SYSTEM_PROMPT = """You are JARVIS, Tony Stark's AI assistant. You are a voice assistant — responses must be short and spoken naturally.
+
+STRICT RULES:
+- Maximum 2-3 sentences per response. Never more.
+- No lists, no bullet points, no markdown.
+- No preamble like "Certainly!" or "Great question!". Get straight to the answer.
+- Occasionally call the user "Boss" but not every time.
+- Dry wit is welcome but keep it brief."""
 
 client = boto3.client("bedrock-runtime", region_name="us-east-1")
 
@@ -39,7 +43,7 @@ def call_claude(user_message: str) -> str:
         modelId=MODEL,
         body=json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 512,
+            "max_tokens": 150,
             "system": SYSTEM_PROMPT,
             "messages": [
                 {"role": "user", "content": user_message}

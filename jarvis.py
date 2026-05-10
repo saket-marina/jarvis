@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 JARVIS - Voice Assistant
-Wake word: "Jarvis" (Whisper-based, fully local)
-Command:   Whisper medium (local, accurate)
+Wake word: "Jarvis" (Whisper sliding window)
+Command:   Whisper small (local, fast)
 Voice:     Daniel (macOS TTS)
 """
 
@@ -13,6 +13,7 @@ import wave
 import struct
 import tempfile
 import subprocess
+import collections
 import urllib.request
 import urllib.error
 import numpy as np
@@ -20,18 +21,22 @@ import pyaudio
 import whisper
 
 # ── Config ────────────────────────────────────────────────────────────────────
-AWS_API_URL        = os.environ.get("JARVIS_API_URL", "")
-WHISPER_MODEL      = "medium"
-TTS_VOICE          = "Daniel"
-TTS_RATE           = 200
-SAMPLE_RATE        = 16000
-CHUNK              = 1024
-SILENCE_THRESHOLD  = 200
-SILENCE_DURATION   = 1.5
-MAX_RECORD_SECONDS = 30
-WAKE_CLIP_SECONDS  = 2.0
-INPUT_DEVICE_INDEX = 0
-WAKE_WORDS         = ["jarvis", "davis", "travis", "barvis"]
+AWS_API_URL          = os.environ.get("JARVIS_API_URL", "")
+WHISPER_MODEL        = "small"
+TTS_VOICE            = "Daniel"
+TTS_RATE             = 200
+SAMPLE_RATE          = 16000
+CHUNK                = 1024
+SILENCE_THRESHOLD    = 200
+SILENCE_DURATION     = 1.5
+MAX_RECORD_SECONDS   = 30
+WAKE_WINDOW_SECONDS  = 2.0
+WAKE_SLIDE_CHUNKS    = 8
+FOLLOW_UP_SECONDS    = 4.0        # How long to wait for a follow-up after response
+INPUT_DEVICE_INDEX   = 0
+WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis"]
+
+WINDOW_CHUNKS = int(SAMPLE_RATE * WAKE_WINDOW_SECONDS / CHUNK)
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 class C:
@@ -70,21 +75,7 @@ def _rms(raw: bytes) -> float:
     shorts = struct.unpack(f"{count}h", raw[:count * 2])
     return (sum(s * s for s in shorts) / count) ** 0.5
 
-def record_clip(pa, seconds: float) -> str:
-    frames_needed = int(SAMPLE_RATE * seconds / CHUNK)
-    stream = pa.open(format=pyaudio.paInt16, channels=1,
-                     rate=SAMPLE_RATE, input=True,
-                     input_device_index=INPUT_DEVICE_INDEX,
-                     frames_per_buffer=CHUNK)
-    frames = []
-    try:
-        for _ in range(frames_needed):
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
-    finally:
-        stream.stop_stream()
-        stream.close()
-
+def frames_to_wav(frames: list) -> str:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         tmp_path = f.name
     with wave.open(tmp_path, "wb") as wf:
@@ -94,41 +85,34 @@ def record_clip(pa, seconds: float) -> str:
         wf.writeframes(b"".join(frames))
     return tmp_path
 
-def record_command(pa) -> str:
-    log("🎙️  LISTENING", "Speak your command...", C.GREEN)
-    stream = pa.open(format=pyaudio.paInt16, channels=1,
-                     rate=SAMPLE_RATE, input=True,
-                     input_device_index=INPUT_DEVICE_INDEX,
-                     frames_per_buffer=CHUNK)
+def record_command(stream) -> str:
+    """Record until silence, return path to WAV."""
     frames = []
     silent_chunks = 0
     silent_limit = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK)
 
-    try:
-        while True:
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
-            rms = _rms(data)
-            silent_chunks = silent_chunks + 1 if rms < SILENCE_THRESHOLD else 0
-            total = len(frames) * CHUNK / SAMPLE_RATE
-            if silent_chunks >= silent_limit or total >= MAX_RECORD_SECONDS:
-                break
-    finally:
-        stream.stop_stream()
-        stream.close()
+    while True:
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        frames.append(data)
+        rms = _rms(data)
+        silent_chunks = silent_chunks + 1 if rms < SILENCE_THRESHOLD else 0
+        total = len(frames) * CHUNK / SAMPLE_RATE
+        if silent_chunks >= silent_limit or total >= MAX_RECORD_SECONDS:
+            break
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        tmp_path = f.name
-    with wave.open(tmp_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(b"".join(frames))
-    return tmp_path
+    return frames_to_wav(frames)
+
+def wait_for_followup(stream) -> bool:
+    """Wait up to FOLLOW_UP_SECONDS for sound. Returns True if sound detected."""
+    follow_up_chunks = int(FOLLOW_UP_SECONDS * SAMPLE_RATE / CHUNK)
+    for _ in range(follow_up_chunks):
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        if _rms(data) > SILENCE_THRESHOLD:
+            return True
+    return False
 
 def contains_wake_word(text: str) -> bool:
-    text = text.lower().strip()
-    return any(w in text for w in WAKE_WORDS)
+    return any(w in text.lower() for w in WAKE_WORDS)
 
 def query_jarvis(user_text: str) -> str:
     if not AWS_API_URL:
@@ -153,7 +137,7 @@ def main():
     if not AWS_API_URL:
         print(f"{C.YELLOW}⚠️  JARVIS_API_URL not set.{C.RESET}\n")
 
-    log("⏳ LOADING", "Whisper medium model...", C.YELLOW)
+    log("⏳ LOADING", "Whisper small model...", C.YELLOW)
     model = whisper.load_model(WHISPER_MODEL)
     log("✅ WHISPER", "Loaded.", C.GREEN)
 
@@ -161,10 +145,32 @@ def main():
     print(f"\n{C.DIM}Listening for wake word...{C.RESET}\n")
 
     pa = pyaudio.PyAudio()
+    stream = pa.open(format=pyaudio.paInt16, channels=1,
+                     rate=SAMPLE_RATE, input=True,
+                     input_device_index=INPUT_DEVICE_INDEX,
+                     frames_per_buffer=CHUNK)
+
+    ring = collections.deque(maxlen=WINDOW_CHUNKS)
+    chunks_since_last_check = 0
 
     try:
         while True:
-            clip_path = record_clip(pa, WAKE_CLIP_SECONDS)
+            # ── Phase 1: Wake word detection (sliding window) ─────────────
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            ring.append(data)
+            chunks_since_last_check += 1
+
+            if len(ring) < WINDOW_CHUNKS:
+                continue
+            if chunks_since_last_check < WAKE_SLIDE_CHUNKS:
+                continue
+
+            chunks_since_last_check = 0
+
+            if _rms(b"".join(ring)) < SILENCE_THRESHOLD:
+                continue
+
+            clip_path = frames_to_wav(list(ring))
             result = model.transcribe(clip_path, language="en", fp16=False,
                                       condition_on_previous_text=False)
             os.unlink(clip_path)
@@ -176,33 +182,48 @@ def main():
             if not contains_wake_word(heard):
                 continue
 
+            # ── Phase 2: Wake word detected ───────────────────────────────
             print(f"\n{C.CYAN}{'─'*50}{C.RESET}")
-            log("⚡ ACTIVATED", f"Wake word detected: '{heard}'", C.CYAN)
+            log("⚡ ACTIVATED", f"Wake word: '{heard}'", C.CYAN)
             speak("Yes?")
+            ring.clear()
 
-            audio_path = record_command(pa)
+            # ── Phase 3: Conversation loop ────────────────────────────────
+            while True:
+                log("🎙️  LISTENING", "Speak your command...", C.GREEN)
+                audio_path = record_command(stream)
 
-            log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
-            result = model.transcribe(audio_path, language="en", fp16=False)
-            command = result["text"].strip()
-            os.unlink(audio_path)
+                log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
+                result = model.transcribe(audio_path, language="en", fp16=False)
+                command = result["text"].strip()
+                os.unlink(audio_path)
 
-            if not command or len(command) < 3:
-                speak("I didn't catch that. Say JARVIS to try again.")
-            else:
+                if not command or len(command) < 3:
+                    speak("I didn't catch that.")
+                    break
+
                 log("🗣️  YOU SAID", command, C.GREEN)
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
                 response = query_jarvis(command)
                 log("🤖 JARVIS", response, C.CYAN)
                 speak(response)
 
+                # Wait for follow-up — if silent, drop back to wake word mode
+                log("🔁 WAITING", f"Listening for follow-up ({FOLLOW_UP_SECONDS:.0f}s)...", C.DIM)
+                if not wait_for_followup(stream):
+                    log("💤 IDLE", "No follow-up. Back to wake word.", C.DIM)
+                    break
+
             print(f"{C.CYAN}{'─'*50}{C.RESET}\n")
             print(f"{C.DIM}Listening for wake word...{C.RESET}\n")
+            ring.clear()
 
     except KeyboardInterrupt:
         print(f"\n{C.DIM}JARVIS offline.{C.RESET}")
         speak("JARVIS offline. Goodbye.")
     finally:
+        stream.stop_stream()
+        stream.close()
         pa.terminate()
 
 if __name__ == "__main__":

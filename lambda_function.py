@@ -1,6 +1,6 @@
 """
 JARVIS Lambda Backend
-Calls Claude Sonnet 4.5 via Amazon Bedrock with tool support.
+Calls Claude Sonnet 4.5 via Amazon Bedrock with tool support and session memory.
 """
 
 import json
@@ -34,12 +34,15 @@ SYSTEM KNOWLEDGE:
   - Skip: osascript -e 'tell application "Spotify" to next track'
 - Timers: osascript -e 'delay SECONDS' -e 'display notification "Timer done!" with title "JARVIS"' &
 - Web search: open "https://www.google.com/search?q=QUERY" (URL encode spaces as +)
-- Volume: osascript -e 'set volume output volume NUMBER' (0-100)"""
+- Volume control: osascript -e 'set volume output volume NUMBER' (0-100). "turn it up" = +20, "turn it down" = -20, use get volume settings to check current first if needed.
+- Do Not Disturb on: osascript -e 'tell application "System Events" to tell process "Control Center" to click menu bar item "Focus"'
+- Mute: osascript -e 'set volume output muted true'
+- Unmute: osascript -e 'set volume output muted false'"""
 
 TOOLS = [
     {
         "name": "run_command",
-        "description": "Execute a shell command on the user's MacBook. Use for opening apps, controlling Spotify, setting timers, searching the web, adjusting volume, etc.",
+        "description": "Execute a shell command on the user's MacBook. Use for opening apps, controlling Spotify, setting timers, searching the web, adjusting volume, Do Not Disturb, etc.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -51,25 +54,22 @@ TOOLS = [
     },
     {
         "name": "get_weather",
-        "description": "Get current weather for a location. Use when the user asks about weather.",
+        "description": "Get current weather for a location.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "location": {"type": "string", "description": "City name, e.g. 'Seattle'"}
+                "location": {"type": "string", "description": "City name e.g. 'Seattle'"}
             },
             "required": ["location"]
         }
     },
     {
         "name": "get_calendar",
-        "description": "Read calendar events from macOS Calendar. Use when user asks about their schedule, today, tomorrow, this week, etc.",
+        "description": "Read calendar events from macOS Calendar.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "days": {
-                    "type": "integer",
-                    "description": "Number of days to look ahead. 1 = today, 2 = today and tomorrow, 7 = this week."
-                }
+                "days": {"type": "integer", "description": "Days to look ahead. 1=today, 2=tomorrow too, 7=this week."}
             },
             "required": ["days"]
         }
@@ -97,19 +97,20 @@ def lambda_handler(event, context):
         body = event
 
     user_message = body.get("message", "").strip()
+    history = body.get("history", [])
     if not user_message:
         return _response(400, {"error": "No message provided"})
 
     try:
-        result = call_claude(user_message)
+        result = call_claude(user_message, history)
         return _response(200, result)
     except Exception as e:
         return _response(500, {"error": str(e)})
 
-def call_claude(user_message: str) -> dict:
-    messages = [{"role": "user", "content": user_message}]
+def call_claude(user_message: str, history: list) -> dict:
+    # Build messages with history
+    messages = history + [{"role": "user", "content": user_message}]
 
-    # First call
     response = client.invoke_model(
         modelId=MODEL,
         body=json.dumps({
@@ -122,7 +123,6 @@ def call_claude(user_message: str) -> dict:
     )
     result = json.loads(response["body"].read())
 
-    # Handle tool use
     if result.get("stop_reason") == "tool_use":
         tool_results = []
         shell_command = None
@@ -131,7 +131,6 @@ def call_claude(user_message: str) -> dict:
         for block in result.get("content", []):
             if block.get("type") != "tool_use":
                 continue
-
             name = block["name"]
             inp = block.get("input", {})
             tool_id = block["id"]
@@ -142,7 +141,7 @@ def call_claude(user_message: str) -> dict:
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_id,
-                    "content": "Command queued for execution."
+                    "content": "Command queued."
                 })
 
             elif name == "get_weather":
@@ -162,11 +161,10 @@ def call_claude(user_message: str) -> dict:
                 })
                 shell_command = f"FETCH_CALENDAR:{days}"
 
-        # If run_command, return immediately — no need for second Claude call
         if shell_command and not shell_command.startswith("FETCH_CALENDAR") and spoken:
             return {"response": spoken, "command": shell_command}
 
-        # For weather/calendar, do a second call so Claude can speak the result
+        # Second call for weather/calendar
         messages.append({"role": "assistant", "content": result["content"]})
         messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_results[0]["tool_use_id"], "content": tool_results[0]["content"]}]})
 
@@ -191,7 +189,6 @@ def call_claude(user_message: str) -> dict:
             if block.get("type") == "text":
                 return {"response": block["text"]}
 
-    # Plain text response
     for block in result.get("content", []):
         if block.get("type") == "text":
             return {"response": block["text"]}

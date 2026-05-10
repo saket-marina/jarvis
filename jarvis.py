@@ -32,9 +32,17 @@ SILENCE_DURATION     = 1.5
 MAX_RECORD_SECONDS   = 30
 WAKE_WINDOW_SECONDS  = 2.0
 WAKE_SLIDE_CHUNKS    = 8
-FOLLOW_UP_SECONDS    = 4.0        # How long to wait for a follow-up after response
+FOLLOW_UP_SECONDS    = 4.0
 INPUT_DEVICE_INDEX   = 0
+MAX_HISTORY          = 10           # Max conversation turns to keep in memory
 WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis"]
+WHISPER_HALLUCINATIONS = [
+    "thank you", "thanks for watching", "thanks for listening",
+    "please subscribe", "you", ".", "..", "...", "bye", "goodbye",
+    "see you", "see you next time", "have a good day", "have a nice day",
+    "have a safe harvest", "says america", "have a safe harvest says america",
+    "like and subscribe", "don't forget to subscribe", "we'll see you next time"
+]
 
 WINDOW_CHUNKS = int(SAMPLE_RATE * WAKE_WINDOW_SECONDS / CHUNK)
 
@@ -61,8 +69,7 @@ def banner():
 """)
 
 def chime():
-    """Play activation sound non-blocking."""
-    subprocess.Popen(["afplay", os.path.join(os.path.dirname(__file__), "activate.wav")])
+    subprocess.Popen(["afplay", os.path.join(os.path.dirname(os.path.abspath(__file__)), "activate.wav")])
 
 def speak(text: str):
     clean = text.replace("**","").replace("*","").replace("`","").replace("#","")
@@ -90,11 +97,9 @@ def frames_to_wav(frames: list) -> str:
     return tmp_path
 
 def record_command(stream) -> str:
-    """Record until silence, return path to WAV."""
     frames = []
     silent_chunks = 0
     silent_limit = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK)
-
     while True:
         data = stream.read(CHUNK, exception_on_overflow=False)
         frames.append(data)
@@ -103,25 +108,15 @@ def record_command(stream) -> str:
         total = len(frames) * CHUNK / SAMPLE_RATE
         if silent_chunks >= silent_limit or total >= MAX_RECORD_SECONDS:
             break
-
     return frames_to_wav(frames)
 
 def wait_for_followup(stream) -> bool:
-    """Wait up to FOLLOW_UP_SECONDS for sound. Returns True if sound detected."""
     follow_up_chunks = int(FOLLOW_UP_SECONDS * SAMPLE_RATE / CHUNK)
     for _ in range(follow_up_chunks):
         data = stream.read(CHUNK, exception_on_overflow=False)
         if _rms(data) > SILENCE_THRESHOLD:
             return True
     return False
-
-WHISPER_HALLUCINATIONS = [
-    "thank you", "thanks for watching", "thanks for listening",
-    "please subscribe", "you", ".", "..", "...", "bye", "goodbye",
-    "see you", "see you next time", "have a good day", "have a nice day",
-    "have a safe harvest", "says america", "have a safe harvest says america",
-    "like and subscribe", "don't forget to subscribe", "we'll see you next time"
-]
 
 def is_hallucination(text: str) -> bool:
     t = text.lower().strip().strip(".,!?")
@@ -132,11 +127,36 @@ def is_hallucination(text: str) -> bool:
 def contains_wake_word(text: str) -> bool:
     return any(w in text.lower() for w in WAKE_WORDS)
 
-def query_jarvis(user_text: str) -> tuple:
-    """Returns (spoken_response, command_or_None)."""
+def get_weather_brief() -> str:
+    try:
+        url = "https://wttr.in/Seattle?format=3"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.64.1"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.read().decode().strip()
+    except:
+        return "Weather unavailable."
+
+def startup_briefing():
+    """JARVIS gives a brief on boot: time + weather."""
+    hour = int(time.strftime("%H"))
+    if hour < 12:
+        greeting = "Good morning"
+    elif hour < 17:
+        greeting = "Good afternoon"
+    else:
+        greeting = "Good evening"
+
+    weather = get_weather_brief()
+    t = time.strftime("%I:%M %p").lstrip("0")
+    briefing = f"{greeting}, Boss. It's {t}. {weather}. Systems are online and ready."
+    log("🌅 BRIEFING", briefing, C.CYAN)
+    speak(briefing)
+
+def query_jarvis(user_text: str, history: list) -> tuple:
+    """Returns (spoken_response, command_or_None). Sends conversation history."""
     if not AWS_API_URL:
         return "API URL not configured.", None
-    payload = json.dumps({"message": user_text}).encode()
+    payload = json.dumps({"message": user_text, "history": history}).encode()
     req = urllib.request.Request(
         AWS_API_URL, data=payload,
         headers={"Content-Type": "application/json"}, method="POST"
@@ -150,32 +170,7 @@ def query_jarvis(user_text: str) -> tuple:
     except Exception as e:
         return f"Connection error: {e}", None
 
-def fetch_calendar(days: int = 1) -> str:
-    """Read calendar events for the next N days via AppleScript."""
-    script = f'''
-    set output to ""
-    set today to current date
-    set startOfDay to today - (time of today)
-    set endOfDay to startOfDay + ({days} * 86400) - 1
-    tell application "Calendar"
-        repeat with cal in calendars
-            set evts to (every event of cal whose start date >= startOfDay and start date <= endOfDay)
-            repeat with e in evts
-                set output to output & summary of e & " on " & (start date of e as string) & "\\n"
-            end repeat
-        end repeat
-    end tell
-    return output
-    '''
-    try:
-        result = subprocess.run(["osascript", "-e", script],
-                                capture_output=True, text=True, timeout=10)
-        return result.stdout.strip() or f"No events in the next {days} day(s)."
-    except Exception as e:
-        return f"Calendar error: {e}"
-
 def run_command(command: str):
-    """Execute a shell command on the Mac."""
     try:
         subprocess.Popen(command, shell=True)
         log("⚙️  EXEC", command, C.YELLOW)
@@ -192,8 +187,11 @@ def main():
     model = whisper.load_model(WHISPER_MODEL)
     log("✅ WHISPER", "Loaded.", C.GREEN)
 
-    speak("JARVIS online. Say JARVIS to activate.")
+    startup_briefing()
     print(f"\n{C.DIM}Listening for wake word...{C.RESET}\n")
+
+    # Session-level conversation history
+    history = []
 
     pa = pyaudio.PyAudio()
     stream = pa.open(format=pyaudio.paInt16, channels=1,
@@ -206,7 +204,7 @@ def main():
 
     try:
         while True:
-            # ── Phase 1: Wake word detection (sliding window) ─────────────
+            # ── Phase 1: Wake word detection ──────────────────────────────
             data = stream.read(CHUNK, exception_on_overflow=False)
             ring.append(data)
             chunks_since_last_check += 1
@@ -255,20 +253,20 @@ def main():
 
                 log("🗣️  YOU SAID", command, C.GREEN)
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
-                response, shell_cmd = query_jarvis(command)
-
-                if shell_cmd and shell_cmd.startswith("FETCH_CALENDAR"):
-                    days = int(shell_cmd.split(":")[1]) if ":" in shell_cmd else 1
-                    log("📅 CALENDAR", f"Reading calendar ({days} day(s))...", C.YELLOW)
-                    events = fetch_calendar(days)
-                    response, shell_cmd = query_jarvis(f"My calendar events for the next {days} day(s): {events}. Summarize this naturally in 1-2 sentences.")
+                response, shell_cmd = query_jarvis(command, history)
 
                 log("🤖 JARVIS", response, C.CYAN)
                 if shell_cmd and not shell_cmd.startswith("FETCH_CALENDAR"):
                     run_command(shell_cmd)
                 speak(response)
 
-                # Wait for follow-up — if silent, drop back to wake word mode
+                # Update history
+                history.append({"role": "user", "content": command})
+                history.append({"role": "assistant", "content": response})
+                if len(history) > MAX_HISTORY * 2:
+                    history = history[-(MAX_HISTORY * 2):]
+
+                # Wait for follow-up
                 log("🔁 WAITING", f"Listening for follow-up ({FOLLOW_UP_SECONDS:.0f}s)...", C.DIM)
                 if not wait_for_followup(stream):
                     log("💤 IDLE", "No follow-up. Back to wake word.", C.DIM)
@@ -280,7 +278,7 @@ def main():
 
     except KeyboardInterrupt:
         print(f"\n{C.DIM}JARVIS offline.{C.RESET}")
-        speak("JARVIS offline. Goodbye.")
+        speak("JARVIS offline. Goodbye, Boss.")
     finally:
         stream.stop_stream()
         stream.close()

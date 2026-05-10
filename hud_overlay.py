@@ -64,10 +64,11 @@ class JarvisHUD:
         tk.Label(hdr, text="J.A.R.V.I.S", bg=BG, fg=C,
                  font=("Courier", 13, "bold")).pack(side="left")
 
-        close_btn = tk.Label(hdr, text="✕", bg=BG, fg=DIM,
-                              font=("Courier", 11), cursor="hand2")
+        close_btn = tk.Label(hdr, text="SHUT DOWN", bg="#110000", fg="#ff4444",
+                              font=("Courier", 8, "bold"), cursor="hand2",
+                              padx=6, pady=2)
         close_btn.pack(side="right")
-        close_btn.bind("<Button-1>", lambda e: self.root.destroy())
+        close_btn.bind("<Button-1>", lambda e: self._shutdown())
 
         tk.Frame(self.root, bg=C, height=1).pack(fill="x", padx=10)
 
@@ -245,6 +246,14 @@ class JarvisHUD:
         self.clock_label.config(
             text=f"{h:02d}:{now.tm_min:02d} {ampm}")
         self.root.after(1000, self._tick)
+
+    def _shutdown(self):
+        import requests
+        try:
+            urllib.request.urlopen('http://localhost:7474/shutdown', timeout=1)
+        except:
+            pass
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()

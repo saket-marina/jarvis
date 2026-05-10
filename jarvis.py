@@ -66,8 +66,10 @@ hud_state = {
 }
 
 # ── HUD HTTP server ───────────────────────────────────────────────────────────
+shutdown_flag = threading.Event()
+
 class HUDHandler(BaseHTTPRequestHandler):
-    def log_message(self, *args): pass  # suppress access logs
+    def log_message(self, *args): pass
 
     def do_GET(self):
         if self.path == '/state':
@@ -76,6 +78,10 @@ class HUDHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(hud_state).encode())
+        elif self.path == '/shutdown':
+            self.send_response(200)
+            self.end_headers()
+            shutdown_flag.set()
         else:
             self.send_response(404)
             self.end_headers()
@@ -279,7 +285,7 @@ def main():
     chunks_since_last_check = 0
 
     try:
-        while True:
+        while not shutdown_flag.is_set():
             # ── Phase 1: Wake word detection ──────────────────────────────
             data = stream.read(CHUNK, exception_on_overflow=False)
             ring.append(data)
@@ -332,6 +338,12 @@ def main():
                     hud_state["status"] = "idle"
                     speak("I didn't catch that.")
                     break
+
+                # Shutdown command
+                if any(w in command.lower() for w in ["shut down", "shutdown", "turn off", "goodbye jarvis", "go offline"]):
+                    speak("JARVIS offline. Goodbye, Boss.")
+                    shutdown_flag.set()
+                    return
 
                 log("🗣️  YOU SAID", command, C.GREEN)
                 hud_state["user_said"] = command

@@ -24,7 +24,7 @@ import whisper
 AWS_API_URL          = os.environ.get("JARVIS_API_URL", "")
 WHISPER_MODEL        = "small"
 TTS_VOICE            = "Daniel"
-TTS_RATE             = 200
+TTS_RATE             = 230
 SAMPLE_RATE          = 16000
 CHUNK                = 1024
 SILENCE_THRESHOLD    = 200
@@ -59,6 +59,10 @@ def banner():
  ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
 {C.RESET}{C.DIM}  Just A Rather Very Intelligent System{C.RESET}
 """)
+
+def chime():
+    """Play activation sound non-blocking."""
+    subprocess.Popen(["afplay", os.path.join(os.path.dirname(__file__), "activate.wav")])
 
 def speak(text: str):
     clean = text.replace("**","").replace("*","").replace("`","").replace("#","")
@@ -114,9 +118,10 @@ def wait_for_followup(stream) -> bool:
 def contains_wake_word(text: str) -> bool:
     return any(w in text.lower() for w in WAKE_WORDS)
 
-def query_jarvis(user_text: str) -> str:
+def query_jarvis(user_text: str) -> tuple:
+    """Returns (spoken_response, command_or_None)."""
     if not AWS_API_URL:
-        return "API URL not configured."
+        return "API URL not configured.", None
     payload = json.dumps({"message": user_text}).encode()
     req = urllib.request.Request(
         AWS_API_URL, data=payload,
@@ -125,11 +130,19 @@ def query_jarvis(user_text: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
-            return body.get("response", "No response received.")
+            return body.get("response", "No response."), body.get("command", None)
     except urllib.error.HTTPError as e:
-        return f"Backend error {e.code}."
+        return f"Backend error {e.code}.", None
     except Exception as e:
-        return f"Connection error: {e}"
+        return f"Connection error: {e}", None
+
+def run_command(command: str):
+    """Execute a shell command on the Mac."""
+    try:
+        subprocess.Popen(command, shell=True)
+        log("⚙️  EXEC", command, C.YELLOW)
+    except Exception as e:
+        log("❌ CMD ERROR", str(e), C.RED)
 
 def main():
     banner()
@@ -185,7 +198,7 @@ def main():
             # ── Phase 2: Wake word detected ───────────────────────────────
             print(f"\n{C.CYAN}{'─'*50}{C.RESET}")
             log("⚡ ACTIVATED", f"Wake word: '{heard}'", C.CYAN)
-            speak("Yes?")
+            chime()
             ring.clear()
 
             # ── Phase 3: Conversation loop ────────────────────────────────
@@ -204,8 +217,10 @@ def main():
 
                 log("🗣️  YOU SAID", command, C.GREEN)
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
-                response = query_jarvis(command)
+                response, shell_cmd = query_jarvis(command)
                 log("🤖 JARVIS", response, C.CYAN)
+                if shell_cmd:
+                    run_command(shell_cmd)
                 speak(response)
 
                 # Wait for follow-up — if silent, drop back to wake word mode

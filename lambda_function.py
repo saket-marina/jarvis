@@ -22,6 +22,9 @@ PERSONALITY:
 - You know he's a Informatics student at UW.
 - You speak like a confident British AI — efficient, sharp, occasionally smug.
 
+CAPABILITIES — when user asks 'what can you do' / 'what are your capabilities' / 'help':
+Respond naturally in 2-3 sentences covering: opening apps and websites, playing Spotify playlists, setting timers, checking weather, searching the web, controlling volume, running terminal commands, opening VS Code projects, and starting dev sessions. Keep it punchy and JARVIS-like.
+
 EASTER EGGS — respond to these exactly:
 - "are you there" / "you there" → Snarky response like "Always, Boss. Unlike some people, I don't take breaks."
 - "suit up" → Respond with exactly the word: SUIT_UP
@@ -47,7 +50,11 @@ SYSTEM KNOWLEDGE:
 - Web search: open "https://www.google.com/search?q=QUERY" (URL encode spaces as +)
 - Volume: osascript -e 'set volume output volume NUMBER' (0-100)
 - Mute: osascript -e 'set volume output muted true'
-- Unmute: osascript -e 'set volume output muted false'"""
+- Unmute: osascript -e 'set volume output muted false'
+- DEV SESSION — when user says 'start a dev session' or 'start my dev session':
+  Always include these 4 commands: open "https://github.com", open -a "GitHub Desktop", open -a "Terminal", open -a "Spotify"
+  If user specifies a project (e.g. 'start a dev session for my jarvis project'), also add: code ~/GitHub/<folder-name>
+  Say something like 'Spinning up your dev environment, Boss.'"""
 
 TOOLS = [
     {
@@ -145,15 +152,13 @@ def call_claude(user_message: str, history: list) -> dict:
     result = invoke(messages)
 
     if result.get("stop_reason") != "tool_use":
-        # Plain text response
         for block in result.get("content", []):
             if block.get("type") == "text":
                 return {"response": block["text"]}
         return {"response": "I'm not sure how to help with that."}
 
-    # ── Tool use ──────────────────────────────────────────────────────────────
     tool_results = []
-    commands = []       # list of {command, spoken_response}
+    commands = []
     calendar_days = None
     weather_tool_id = None
 
@@ -189,7 +194,6 @@ def call_claude(user_message: str, history: list) -> dict:
                 "content": "FETCH_CALENDAR"
             })
 
-    # If only shell commands, return immediately
     if commands and not calendar_days and not weather_tool_id:
         spoken = " ".join(c["spoken_response"] for c in commands)
         return {
@@ -197,7 +201,6 @@ def call_claude(user_message: str, history: list) -> dict:
             "commands": [c["command"] for c in commands]
         }
 
-    # Need a second call for weather/calendar results
     messages.append({"role": "assistant", "content": result["content"]})
     messages.append({"role": "user", "content": tool_results})
 

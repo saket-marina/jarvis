@@ -34,7 +34,7 @@ WAKE_WINDOW_SECONDS  = 2.0
 WAKE_SLIDE_CHUNKS    = 8
 FOLLOW_UP_SECONDS    = 4.0        # How long to wait for a follow-up after response
 INPUT_DEVICE_INDEX   = 0
-WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis"]
+WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis"]
 
 WINDOW_CHUNKS = int(SAMPLE_RATE * WAKE_WINDOW_SECONDS / CHUNK)
 
@@ -118,12 +118,16 @@ def wait_for_followup(stream) -> bool:
 WHISPER_HALLUCINATIONS = [
     "thank you", "thanks for watching", "thanks for listening",
     "please subscribe", "you", ".", "..", "...", "bye", "goodbye",
-    "see you", "see you next time", "have a good day", "have a nice day"
+    "see you", "see you next time", "have a good day", "have a nice day",
+    "have a safe harvest", "says america", "have a safe harvest says america",
+    "like and subscribe", "don't forget to subscribe", "we'll see you next time"
 ]
 
 def is_hallucination(text: str) -> bool:
     t = text.lower().strip().strip(".,!?")
-    return t in WHISPER_HALLUCINATIONS or len(t) < 2
+    if len(t) < 2:
+        return True
+    return any(h in t for h in WHISPER_HALLUCINATIONS)
 
 def contains_wake_word(text: str) -> bool:
     return any(w in text.lower() for w in WAKE_WORDS)
@@ -145,6 +149,30 @@ def query_jarvis(user_text: str) -> tuple:
         return f"Backend error {e.code}.", None
     except Exception as e:
         return f"Connection error: {e}", None
+
+def fetch_calendar(days: int = 1) -> str:
+    """Read calendar events for the next N days via AppleScript."""
+    script = f'''
+    set output to ""
+    set today to current date
+    set startOfDay to today - (time of today)
+    set endOfDay to startOfDay + ({days} * 86400) - 1
+    tell application "Calendar"
+        repeat with cal in calendars
+            set evts to (every event of cal whose start date >= startOfDay and start date <= endOfDay)
+            repeat with e in evts
+                set output to output & summary of e & " on " & (start date of e as string) & "\\n"
+            end repeat
+        end repeat
+    end tell
+    return output
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", script],
+                                capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() or f"No events in the next {days} day(s)."
+    except Exception as e:
+        return f"Calendar error: {e}"
 
 def run_command(command: str):
     """Execute a shell command on the Mac."""
@@ -228,8 +256,15 @@ def main():
                 log("🗣️  YOU SAID", command, C.GREEN)
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
                 response, shell_cmd = query_jarvis(command)
+
+                if shell_cmd and shell_cmd.startswith("FETCH_CALENDAR"):
+                    days = int(shell_cmd.split(":")[1]) if ":" in shell_cmd else 1
+                    log("📅 CALENDAR", f"Reading calendar ({days} day(s))...", C.YELLOW)
+                    events = fetch_calendar(days)
+                    response, shell_cmd = query_jarvis(f"My calendar events for the next {days} day(s): {events}. Summarize this naturally in 1-2 sentences.")
+
                 log("🤖 JARVIS", response, C.CYAN)
-                if shell_cmd:
+                if shell_cmd and not shell_cmd.startswith("FETCH_CALENDAR"):
                     run_command(shell_cmd)
                 speak(response)
 

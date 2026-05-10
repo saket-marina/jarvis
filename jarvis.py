@@ -30,7 +30,7 @@ TTS_VOICE            = "Daniel"
 TTS_RATE             = 230
 SAMPLE_RATE          = 16000
 CHUNK                = 1024
-SILENCE_THRESHOLD    = 200
+SILENCE_THRESHOLD    = 150
 SILENCE_DURATION     = 1.2
 MAX_RECORD_SECONDS   = 30
 WAKE_WINDOW_SECONDS  = 2.0
@@ -45,7 +45,9 @@ WHISPER_HALLUCINATIONS = [
     "please subscribe", ".", "..", "...", "bye", "goodbye",
     "have a good day", "have a nice day",
     "have a safe harvest", "says america", "have a safe harvest says america",
-    "like and subscribe", "don't forget to subscribe", "we'll see you next time"
+    "like and subscribe", "don't forget to subscribe", "we'll see you next time",
+    "peace", "enjoy", "enjoy this", "so", "john", "in your orbit",
+    "j trade lucky you", "java you you",
 ]
 
 WINDOW_CHUNKS = int(SAMPLE_RATE * WAKE_WINDOW_SECONDS / CHUNK)
@@ -179,7 +181,8 @@ def is_hallucination(text: str) -> bool:
     return any(h in t for h in WHISPER_HALLUCINATIONS)
 
 def contains_wake_word(text: str) -> bool:
-    return any(w in text.lower() for w in WAKE_WORDS)
+    cleaned = text.lower().strip().strip(".,!?")
+    return any(w in cleaned for w in WAKE_WORDS)
 
 def get_weather_brief() -> str:
     try:

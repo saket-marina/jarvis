@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
 """
 JARVIS - Voice Assistant
-Wake word: "Yo Jarvis"
+Wake word: "Jarvis" (Whisper-based, fully local)
+Command:   Whisper medium (local, accurate)
+Voice:     Daniel (macOS TTS)
 """
 
 import os
-import sys
 import time
 import json
 import wave
 import struct
 import tempfile
-import threading
 import subprocess
 import urllib.request
 import urllib.error
+import numpy as np
+import pyaudio
+import whisper
 
 # ── Config ────────────────────────────────────────────────────────────────────
-AWS_API_URL = os.environ.get("JARVIS_API_URL", "")  # Set this after deploying AWS
-WAKE_WORD = "yo jarvis"
-SILENCE_THRESHOLD = 500       # Adjust if mic is too/not sensitive
-SILENCE_DURATION = 1.5        # Seconds of silence before stopping recording
+AWS_API_URL        = os.environ.get("JARVIS_API_URL", "")
+WHISPER_MODEL      = "medium"
+TTS_VOICE          = "Daniel"
+TTS_RATE           = 200
+SAMPLE_RATE        = 16000
+CHUNK              = 1024
+SILENCE_THRESHOLD  = 200
+SILENCE_DURATION   = 1.5
 MAX_RECORD_SECONDS = 30
-SAMPLE_RATE = 16000
-CHANNELS = 1
-CHUNK = 1024
+WAKE_CLIP_SECONDS  = 2.0
+INPUT_DEVICE_INDEX = 0
+WAKE_WORDS         = ["jarvis", "davis", "travis", "barvis"]
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 class C:
@@ -49,73 +56,12 @@ def banner():
 """)
 
 def speak(text: str):
-    """macOS TTS via 'say' command."""
-    # Strip markdown-style formatting for cleaner speech
-    clean = text.replace("**", "").replace("*", "").replace("`", "").replace("#", "")
-    subprocess.run(["say", "-v", "Alex", "-r", "200", clean], check=False)
+    clean = text.replace("**","").replace("*","").replace("`","").replace("#","")
+    subprocess.run(["say", "-v", TTS_VOICE, "-r", str(TTS_RATE), clean], check=False)
 
 def log(label: str, msg: str, color=C.CYAN):
     ts = time.strftime("%H:%M:%S")
     print(f"{C.DIM}[{ts}]{C.RESET} {color}{C.BOLD}{label}{C.RESET}  {msg}")
-
-# ── Wake Word Detection (using macOS speech recognition via SpeechRecognition) ─
-def check_dependencies():
-    missing = []
-    try:
-        import speech_recognition  # noqa
-    except ImportError:
-        missing.append("SpeechRecognition")
-    try:
-        import pyaudio  # noqa
-    except ImportError:
-        missing.append("pyaudio")
-    try:
-        import openai_whisper  # noqa
-    except ImportError:
-        try:
-            import whisper  # noqa
-        except ImportError:
-            missing.append("openai-whisper")
-
-    if missing:
-        print(f"{C.RED}Missing packages: {', '.join(missing)}{C.RESET}")
-        print(f"Run: {C.YELLOW}pip install {' '.join(missing)}{C.RESET}")
-        sys.exit(1)
-
-def record_until_silence(recognizer, source) -> bytes:
-    """Record audio chunks until silence is detected."""
-    import speech_recognition as sr
-
-    log("🎙️  LISTENING", "Speak your command...", C.GREEN)
-    frames = []
-    silent_chunks = 0
-    silent_limit = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK)
-
-    while True:
-        audio_chunk = recognizer.record(source, duration=CHUNK / SAMPLE_RATE)
-        raw = audio_chunk.get_raw_data()
-        frames.append(raw)
-
-        # Detect silence
-        rms = _rms(raw)
-        if rms < SILENCE_THRESHOLD:
-            silent_chunks += 1
-        else:
-            silent_chunks = 0
-
-        total_duration = len(frames) * (CHUNK / SAMPLE_RATE)
-        if silent_chunks >= silent_limit or total_duration >= MAX_RECORD_SECONDS:
-            break
-
-    # Build WAV in memory
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        tmp_path = f.name
-        with wave.open(f, "wb") as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(b"".join(frames))
-    return tmp_path
 
 def _rms(raw: bytes) -> float:
     count = len(raw) // 2
@@ -124,115 +70,140 @@ def _rms(raw: bytes) -> float:
     shorts = struct.unpack(f"{count}h", raw[:count * 2])
     return (sum(s * s for s in shorts) / count) ** 0.5
 
-def transcribe_whisper(audio_path: str) -> str:
+def record_clip(pa, seconds: float) -> str:
+    frames_needed = int(SAMPLE_RATE * seconds / CHUNK)
+    stream = pa.open(format=pyaudio.paInt16, channels=1,
+                     rate=SAMPLE_RATE, input=True,
+                     input_device_index=INPUT_DEVICE_INDEX,
+                     frames_per_buffer=CHUNK)
+    frames = []
     try:
-        import whisper
-    except ImportError:
-        import openai_whisper as whisper
+        for _ in range(frames_needed):
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+    finally:
+        stream.stop_stream()
+        stream.close()
 
-    log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
-    model = whisper.load_model("base")
-    result = model.transcribe(audio_path, language="en", fp16=False)
-    return result["text"].strip()
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    with wave.open(tmp_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(b"".join(frames))
+    return tmp_path
+
+def record_command(pa) -> str:
+    log("🎙️  LISTENING", "Speak your command...", C.GREEN)
+    stream = pa.open(format=pyaudio.paInt16, channels=1,
+                     rate=SAMPLE_RATE, input=True,
+                     input_device_index=INPUT_DEVICE_INDEX,
+                     frames_per_buffer=CHUNK)
+    frames = []
+    silent_chunks = 0
+    silent_limit = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK)
+
+    try:
+        while True:
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+            rms = _rms(data)
+            silent_chunks = silent_chunks + 1 if rms < SILENCE_THRESHOLD else 0
+            total = len(frames) * CHUNK / SAMPLE_RATE
+            if silent_chunks >= silent_limit or total >= MAX_RECORD_SECONDS:
+                break
+    finally:
+        stream.stop_stream()
+        stream.close()
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    with wave.open(tmp_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(b"".join(frames))
+    return tmp_path
+
+def contains_wake_word(text: str) -> bool:
+    text = text.lower().strip()
+    return any(w in text for w in WAKE_WORDS)
 
 def query_jarvis(user_text: str) -> str:
-    """Send query to AWS Lambda backend."""
     if not AWS_API_URL:
-        return "API URL not configured. Please set the JARVIS_API_URL environment variable."
-
+        return "API URL not configured."
     payload = json.dumps({"message": user_text}).encode()
     req = urllib.request.Request(
-        AWS_API_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
+        AWS_API_URL, data=payload,
+        headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
             return body.get("response", "No response received.")
     except urllib.error.HTTPError as e:
-        return f"Backend error: {e.code}"
+        return f"Backend error {e.code}."
     except Exception as e:
         return f"Connection error: {e}"
 
-def listen_for_wake_word(recognizer, source) -> bool:
-    """Listen for wake word using Google STT (fast, free for short clips)."""
-    import speech_recognition as sr
-
-    try:
-        audio = recognizer.listen(source, timeout=5, phrase_time_limit=4)
-        text = recognizer.recognize_google(audio).lower()
-        log("👂 HEARD", text, C.DIM)
-        return WAKE_WORD in text
-    except sr.WaitTimeoutError:
-        return False
-    except sr.UnknownValueError:
-        return False
-    except sr.RequestError:
-        # Offline fallback: just return False and keep waiting
-        return False
-
 def main():
-    check_dependencies()
-    import speech_recognition as sr
-
     banner()
 
     if not AWS_API_URL:
-        print(f"{C.YELLOW}⚠️  JARVIS_API_URL not set. Set it after deploying AWS:{C.RESET}")
-        print(f"   export JARVIS_API_URL=https://your-api-id.execute-api.us-east-1.amazonaws.com/prod/jarvis\n")
+        print(f"{C.YELLOW}⚠️  JARVIS_API_URL not set.{C.RESET}\n")
 
-    speak("JARVIS online. Say 'Yo JARVIS' to activate.")
-    log("✅ READY", f"Listening for wake word: '{WAKE_WORD.upper()}'", C.GREEN)
+    log("⏳ LOADING", "Whisper medium model...", C.YELLOW)
+    model = whisper.load_model(WHISPER_MODEL)
+    log("✅ WHISPER", "Loaded.", C.GREEN)
 
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = SILENCE_THRESHOLD
-    recognizer.dynamic_energy_threshold = True
+    speak("JARVIS online. Say JARVIS to activate.")
+    print(f"\n{C.DIM}Listening for wake word...{C.RESET}\n")
 
-    with sr.Microphone(sample_rate=SAMPLE_RATE) as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        print(f"{C.DIM}  Ambient noise calibrated.{C.RESET}\n")
+    pa = pyaudio.PyAudio()
 
+    try:
         while True:
-            try:
-                # Phase 1: Wake word
-                if not listen_for_wake_word(recognizer, source):
-                    continue
+            clip_path = record_clip(pa, WAKE_CLIP_SECONDS)
+            result = model.transcribe(clip_path, language="en", fp16=False,
+                                      condition_on_previous_text=False)
+            os.unlink(clip_path)
+            heard = result["text"].strip()
 
-                # Acknowledged
-                print(f"\n{C.CYAN}{'─'*50}{C.RESET}")
-                log("⚡ ACTIVATED", "JARVIS is listening...", C.CYAN)
-                speak("Yes?")
+            if heard:
+                log("👂 HEARD", heard, C.DIM)
 
-                # Phase 2: Record command
-                audio_path = record_until_silence(recognizer, source)
+            if not contains_wake_word(heard):
+                continue
 
-                # Phase 3: Transcribe
-                command = transcribe_whisper(audio_path)
-                os.unlink(audio_path)
+            print(f"\n{C.CYAN}{'─'*50}{C.RESET}")
+            log("⚡ ACTIVATED", f"Wake word detected: '{heard}'", C.CYAN)
+            speak("Yes?")
 
-                if not command or len(command) < 3:
-                    speak("I didn't catch that. Say 'Yo JARVIS' again to activate.")
-                    continue
+            audio_path = record_command(pa)
 
+            log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
+            result = model.transcribe(audio_path, language="en", fp16=False)
+            command = result["text"].strip()
+            os.unlink(audio_path)
+
+            if not command or len(command) < 3:
+                speak("I didn't catch that. Say JARVIS to try again.")
+            else:
                 log("🗣️  YOU SAID", command, C.GREEN)
-
-                # Phase 4: Query backend
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
                 response = query_jarvis(command)
-
                 log("🤖 JARVIS", response, C.CYAN)
                 speak(response)
-                print(f"{C.CYAN}{'─'*50}{C.RESET}\n")
 
-            except KeyboardInterrupt:
-                print(f"\n{C.DIM}JARVIS offline.{C.RESET}")
-                speak("JARVIS offline. Goodbye.")
-                sys.exit(0)
-            except Exception as e:
-                log("❌ ERROR", str(e), C.RED)
-                time.sleep(1)
+            print(f"{C.CYAN}{'─'*50}{C.RESET}\n")
+            print(f"{C.DIM}Listening for wake word...{C.RESET}\n")
+
+    except KeyboardInterrupt:
+        print(f"\n{C.DIM}JARVIS offline.{C.RESET}")
+        speak("JARVIS offline. Goodbye.")
+    finally:
+        pa.terminate()
 
 if __name__ == "__main__":
     main()

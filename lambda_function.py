@@ -1,23 +1,21 @@
 """
 JARVIS Lambda Backend
 Deploy this to AWS Lambda (Python 3.11)
-Calls Anthropic Claude API and returns the response.
+Calls Claude Sonnet 4.5 via Amazon Bedrock.
 """
 
 import json
-import os
-import urllib.request
-import urllib.error
+import boto3
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-MODEL = "claude-haiku-4-5-20251001"  # cheapest/fastest Claude model
+MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the AI assistant built by Tony Stark. 
 You are highly intelligent, efficient, and slightly dry in humor. You address the user as "Boss" occasionally.
 Keep responses concise — you are a voice assistant, so avoid long lists or markdown formatting.
 Speak in plain sentences. Be direct and helpful."""
 
+client = boto3.client("bedrock-runtime", region_name="us-east-1")
+
 def lambda_handler(event, context):
-    # Parse body (API Gateway sends it as a string)
     try:
         if isinstance(event.get("body"), str):
             body = json.loads(event["body"])
@@ -30,7 +28,6 @@ def lambda_handler(event, context):
     if not user_message:
         return _response(400, {"error": "No message provided"})
 
-    # Call Anthropic
     try:
         reply = call_claude(user_message)
         return _response(200, {"response": reply})
@@ -38,29 +35,19 @@ def lambda_handler(event, context):
         return _response(500, {"error": str(e)})
 
 def call_claude(user_message: str) -> str:
-    payload = json.dumps({
-        "model": MODEL,
-        "max_tokens": 512,
-        "system": SYSTEM_PROMPT,
-        "messages": [
-            {"role": "user", "content": user_message}
-        ]
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01"
-        },
-        method="POST"
+    response = client.invoke_model(
+        modelId=MODEL,
+        body=json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 512,
+            "system": SYSTEM_PROMPT,
+            "messages": [
+                {"role": "user", "content": user_message}
+            ]
+        })
     )
-
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        data = json.loads(resp.read().decode())
-        return data["content"][0]["text"]
+    result = json.loads(response["body"].read())
+    return result["content"][0]["text"]
 
 def _response(status: int, body: dict) -> dict:
     return {

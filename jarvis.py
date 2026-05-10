@@ -115,6 +115,16 @@ def wait_for_followup(stream) -> bool:
             return True
     return False
 
+WHISPER_HALLUCINATIONS = [
+    "thank you", "thanks for watching", "thanks for listening",
+    "please subscribe", "you", ".", "..", "...", "bye", "goodbye",
+    "see you", "see you next time", "have a good day", "have a nice day"
+]
+
+def is_hallucination(text: str) -> bool:
+    t = text.lower().strip().strip(".,!?")
+    return t in WHISPER_HALLUCINATIONS or len(t) < 2
+
 def contains_wake_word(text: str) -> bool:
     return any(w in text.lower() for w in WAKE_WORDS)
 
@@ -189,10 +199,10 @@ def main():
             os.unlink(clip_path)
             heard = result["text"].strip()
 
-            if heard:
+            if heard and not is_hallucination(heard):
                 log("👂 HEARD", heard, C.DIM)
 
-            if not contains_wake_word(heard):
+            if is_hallucination(heard) or not contains_wake_word(heard):
                 continue
 
             # ── Phase 2: Wake word detected ───────────────────────────────
@@ -211,7 +221,7 @@ def main():
                 command = result["text"].strip()
                 os.unlink(audio_path)
 
-                if not command or len(command) < 3:
+                if not command or is_hallucination(command):
                     speak("I didn't catch that.")
                     break
 

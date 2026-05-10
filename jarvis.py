@@ -28,7 +28,7 @@ TTS_RATE             = 230
 SAMPLE_RATE          = 16000
 CHUNK                = 1024
 SILENCE_THRESHOLD    = 200
-SILENCE_DURATION     = 1.5
+SILENCE_DURATION     = 1.2
 MAX_RECORD_SECONDS   = 30
 WAKE_WINDOW_SECONDS  = 2.0
 WAKE_SLIDE_CHUNKS    = 8
@@ -38,8 +38,8 @@ MAX_HISTORY          = 10           # Max conversation turns to keep in memory
 WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis"]
 WHISPER_HALLUCINATIONS = [
     "thank you", "thanks for watching", "thanks for listening",
-    "please subscribe", "you", ".", "..", "...", "bye", "goodbye",
-    "see you", "see you next time", "have a good day", "have a nice day",
+    "please subscribe", ".", "..", "...", "bye", "goodbye",
+    "have a good day", "have a nice day",
     "have a safe harvest", "says america", "have a safe harvest says america",
     "like and subscribe", "don't forget to subscribe", "we'll see you next time"
 ]
@@ -121,6 +121,9 @@ def wait_for_followup(stream) -> bool:
 def is_hallucination(text: str) -> bool:
     t = text.lower().strip().strip(".,!?")
     if len(t) < 2:
+        return True
+    # Filter non-ASCII (Chinese, Arabic, etc. hallucinations)
+    if any(ord(c) > 127 for c in t):
         return True
     return any(h in t for h in WHISPER_HALLUCINATIONS)
 
@@ -221,7 +224,8 @@ def main():
 
             clip_path = frames_to_wav(list(ring))
             result = model.transcribe(clip_path, language="en", fp16=False,
-                                      condition_on_previous_text=False)
+                                      condition_on_previous_text=False,
+                                      suppress_blank=True)
             os.unlink(clip_path)
             heard = result["text"].strip()
 
@@ -243,7 +247,8 @@ def main():
                 audio_path = record_command(stream)
 
                 log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
-                result = model.transcribe(audio_path, language="en", fp16=False)
+                result = model.transcribe(audio_path, language="en", fp16=False,
+                                          suppress_blank=True)
                 command = result["text"].strip()
                 os.unlink(audio_path)
 

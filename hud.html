@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>JARVIS HUD</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #00d4ff;
+    font-family: 'Courier New', monospace;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .hud {
+    width: 100%;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: 8px;
+    padding: 12px;
+  }
+  .top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #00d4ff33;
+    padding-bottom: 8px;
+  }
+  .logo { font-size: 13px; font-weight: bold; letter-spacing: 4px; color: #00d4ff; }
+  .top-info { display: flex; gap: 24px; font-size: 11px; color: #00d4ff99; }
+  .top-info span { letter-spacing: 1px; }
+  .top-info .val { color: #00d4ff; font-weight: bold; }
+  .main { display: grid; grid-template-columns: 220px 1fr 220px; gap: 8px; }
+  .panel {
+    border: 1px solid #00d4ff33;
+    padding: 10px;
+    position: relative;
+    background: #00d4ff05;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: -1px; left: 10px;
+    width: 40px; height: 1px;
+    background: #00d4ff;
+  }
+  .panel-title { font-size: 9px; letter-spacing: 3px; color: #00d4ff66; margin-bottom: 8px; text-transform: uppercase; }
+  .status-indicator { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #00d4ff44; }
+  .status-dot.idle { background: #00d4ff44; animation: none; }
+  .status-dot.listening { background: #00ff88; animation: pg 1s infinite; }
+  .status-dot.thinking { background: #ffaa00; animation: pa 0.5s infinite; }
+  .status-dot.speaking { background: #00d4ff; animation: pb 0.3s infinite; }
+  @keyframes pb { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+  @keyframes pg { 0%,100%{opacity:1;box-shadow:0 0 6px #00ff88} 50%{opacity:0.6;box-shadow:none} }
+  @keyframes pa { 0%,100%{opacity:1;box-shadow:0 0 6px #ffaa00} 50%{opacity:0.4} }
+  .status-text { font-size: 11px; letter-spacing: 2px; color: #00d4ff; }
+  .arc-reactor { display: flex; justify-content: center; margin: 8px 0; }
+  .arc-reactor svg { width: 60px; height: 60px; }
+  .transcript { display: flex; flex-direction: column; gap: 6px; height: 100%; overflow-y: auto; }
+  .transcript-entry { font-size: 11px; line-height: 1.5; padding: 6px 8px; border-left: 2px solid #00d4ff33; }
+  .transcript-entry.user { border-left-color: #00ff88; color: #00ff8899; }
+  .transcript-entry.user .label { color: #00ff88; font-size: 9px; letter-spacing: 2px; }
+  .transcript-entry.jarvis { border-left-color: #00d4ff; color: #00d4ffbb; }
+  .transcript-entry.jarvis .label { color: #00d4ff; font-size: 9px; letter-spacing: 2px; }
+  .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid #00d4ff11; font-size: 10px; }
+  .metric-label { color: #00d4ff55; letter-spacing: 1px; }
+  .metric-val { color: #00d4ff; font-weight: bold; font-size: 11px; }
+  .bar-wrap { width: 100%; height: 3px; background: #00d4ff11; margin: 4px 0; border-radius: 2px; }
+  .bar-fill { height: 100%; background: #00d4ff; border-radius: 2px; transition: width 1s linear; }
+  .weather-big { font-size: 22px; font-weight: bold; color: #00d4ff; text-align: center; margin: 8px 0 4px; }
+  .weather-desc { font-size: 10px; color: #00d4ff66; text-align: center; letter-spacing: 2px; }
+  .bottom-bar { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #00d4ff22; padding-top: 8px; font-size: 9px; letter-spacing: 2px; color: #00d4ff44; }
+  body::after { content: ''; position: fixed; top:0;left:0;right:0;bottom:0; background: repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,212,255,0.015) 2px,rgba(0,212,255,0.015) 4px); pointer-events: none; z-index: 999; }
+  .corner { position: absolute; width: 8px; height: 8px; border-color: #00d4ff66; border-style: solid; }
+  .corner.tl { top:-1px;left:-1px;border-width:1px 0 0 1px; }
+  .corner.tr { top:-1px;right:-1px;border-width:1px 1px 0 0; }
+  .corner.bl { bottom:-1px;left:-1px;border-width:0 0 1px 1px; }
+  .corner.br { bottom:-1px;right:-1px;border-width:0 1px 1px 0; }
+</style>
+</head>
+<body>
+<div class="hud">
+  <div class="top-bar">
+    <div class="logo">J.A.R.V.I.S</div>
+    <div class="top-info">
+      <span>LOCATION <span class="val">SEATTLE, WA</span></span>
+      <span>TIME <span class="val" id="clock">--:-- --</span></span>
+      <span>SESSION <span class="val" id="session-time">00:00</span></span>
+    </div>
+    <div class="top-info">
+      <span>SYSTEM <span class="val" style="color:#00ff88">ONLINE</span></span>
+    </div>
+  </div>
+
+  <div class="main">
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Status</div>
+        <div class="arc-reactor">
+          <svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="30" cy="30" r="28" fill="none" stroke="#00d4ff22" stroke-width="1"/>
+            <circle cx="30" cy="30" r="22" fill="none" stroke="#00d4ff44" stroke-width="1"/>
+            <circle cx="30" cy="30" r="14" fill="none" stroke="#00d4ff" stroke-width="1.5"/>
+            <circle cx="30" cy="30" r="7" fill="#00d4ff33" stroke="#00d4ff" stroke-width="1"/>
+            <circle cx="30" cy="30" r="3" fill="#00d4ff"><animate attributeName="opacity" values="1;0.3;1" dur="2s" repeatCount="indefinite"/></circle>
+            <line x1="30" y1="8" x2="30" y2="16" stroke="#00d4ff" stroke-width="1"/>
+            <line x1="30" y1="44" x2="30" y2="52" stroke="#00d4ff" stroke-width="1"/>
+            <line x1="8" y1="30" x2="16" y2="30" stroke="#00d4ff" stroke-width="1"/>
+            <line x1="44" y1="30" x2="52" y2="30" stroke="#00d4ff" stroke-width="1"/>
+          </svg>
+        </div>
+        <div class="status-indicator">
+          <div class="status-dot idle" id="dot"></div>
+          <div class="status-text" id="status-text">IDLE</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Weather · Seattle</div>
+        <div class="weather-big" id="weather-temp">--°F</div>
+        <div class="weather-desc" id="weather-desc">LOADING...</div>
+      </div>
+
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">System</div>
+        <div class="metric-row"><span class="metric-label">MODEL</span><span class="metric-val" style="font-size:9px">SONNET 4.5</span></div>
+        <div class="metric-row"><span class="metric-label">STT</span><span class="metric-val" style="font-size:9px">WHISPER SM</span></div>
+        <div class="metric-row"><span class="metric-label">QUERIES</span><span class="metric-val" id="query-count">0</span></div>
+        <div class="metric-row"><span class="metric-label">HISTORY</span><span class="metric-val" id="history-count">0 TURNS</span></div>
+      </div>
+    </div>
+
+    <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+      <div class="panel-title">Conversation Log</div>
+      <div class="transcript" id="transcript">
+        <div class="transcript-entry jarvis"><div class="label">JARVIS</div>Systems online and ready.</div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Audio Level</div>
+        <div id="bars" style="display:flex;align-items:flex-end;gap:3px;height:50px;margin-top:8px;"></div>
+      </div>
+
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Wake Words Detected</div>
+        <div style="font-size:28px;font-weight:bold;color:#00d4ff;text-align:center;margin:8px 0;" id="wake-count">0</div>
+        <div class="metric-row"><span class="metric-label">LAST HEARD</span><span class="metric-val" id="last-wake" style="font-size:9px">—</span></div>
+      </div>
+
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Uptime</div>
+        <div style="font-size:20px;font-weight:bold;color:#00d4ff;text-align:center;margin:8px 0;" id="uptime">00:00:00</div>
+      </div>
+
+      <div class="panel">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="panel-title">Commands Executed</div>
+        <div style="font-size:28px;font-weight:bold;color:#00d4ff;text-align:center;margin:8px 0;" id="cmd-count">0</div>
+        <div class="metric-row"><span class="metric-label">LAST</span><span class="metric-val" id="last-cmd" style="font-size:9px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <span>JARVIS v2.0 · AWS BEDROCK · CLAUDE SONNET 4.5</span>
+    <span id="bottom-status">AWAITING ACTIVATION</span>
+    <span>SAKET MARINA · UW INFORMATICS</span>
+  </div>
+</div>
+
+<script>
+const statusMap = {
+  idle: { text: 'IDLE', cls: 'idle' },
+  listening: { text: 'LISTENING', cls: 'listening' },
+  thinking: { text: 'PROCESSING', cls: 'thinking' },
+  speaking: { text: 'SPEAKING', cls: 'speaking' },
+};
+
+let startTime = Date.now();
+let lastUserSaid = null, lastJarvisSaid = null;
+
+function setStatus(s) {
+  const m = statusMap[s] || statusMap.idle;
+  document.getElementById('dot').className = 'status-dot ' + m.cls;
+  document.getElementById('status-text').textContent = m.text;
+  document.getElementById('bottom-status').textContent = m.text;
+}
+
+function addTranscript(role, text) {
+  const t = document.getElementById('transcript');
+  const div = document.createElement('div');
+  div.className = 'transcript-entry ' + role;
+  div.innerHTML = `<div class="label">${role === 'user' ? 'BOSS' : 'JARVIS'}</div>${text}`;
+  t.appendChild(div);
+  t.scrollTop = t.scrollHeight;
+  if (t.children.length > 30) t.removeChild(t.children[0]);
+}
+
+function updateClock() {
+  const now = new Date();
+  let h = now.getHours(), m = now.getMinutes(), ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  document.getElementById('clock').textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')} ${ampm}`;
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const hh = Math.floor(elapsed/3600), mm = Math.floor((elapsed%3600)/60), ss = elapsed%60;
+  document.getElementById('uptime').textContent = `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+  document.getElementById('session-time').textContent = `${String(Math.floor(elapsed/60)).padStart(2,'0')}:${String(elapsed%60).padStart(2,'0')}`;
+}
+
+function animateBars() {
+  const bars = document.getElementById('bars');
+  bars.innerHTML = '';
+  const active = document.getElementById('status-text').textContent !== 'IDLE';
+  for (let i = 0; i < 20; i++) {
+    const b = document.createElement('div');
+    const h = active ? Math.random()*44+6 : Math.random()*8+2;
+    b.style.cssText = `width:6px;height:${h}px;background:#00d4ff;opacity:${active?0.7+Math.random()*0.3:0.2};border-radius:1px;`;
+    bars.appendChild(b);
+  }
+}
+
+function poll() {
+  fetch('http://localhost:7474/state')
+    .then(r => r.json())
+    .then(data => {
+      setStatus(data.status || 'idle');
+      if (data.user_said && data.user_said !== lastUserSaid) {
+        addTranscript('user', data.user_said);
+        lastUserSaid = data.user_said;
+      }
+      if (data.jarvis_said && data.jarvis_said !== lastJarvisSaid) {
+        addTranscript('jarvis', data.jarvis_said);
+        lastJarvisSaid = data.jarvis_said;
+      }
+      if (data.wake_count !== undefined) document.getElementById('wake-count').textContent = data.wake_count;
+      if (data.query_count !== undefined) document.getElementById('query-count').textContent = data.query_count;
+      if (data.history_count !== undefined) document.getElementById('history-count').textContent = data.history_count + ' TURNS';
+      if (data.cmd_count !== undefined) document.getElementById('cmd-count').textContent = data.cmd_count;
+      if (data.last_cmd) document.getElementById('last-cmd').textContent = data.last_cmd;
+      if (data.last_wake) document.getElementById('last-wake').textContent = data.last_wake.toUpperCase();
+      if (data.weather_temp) document.getElementById('weather-temp').textContent = data.weather_temp;
+      if (data.weather_desc) document.getElementById('weather-desc').textContent = data.weather_desc.toUpperCase();
+    })
+    .catch(() => {});
+}
+
+setInterval(updateClock, 1000);
+setInterval(animateBars, 120);
+setInterval(poll, 500);
+updateClock();
+animateBars();
+</script>
+</body>
+</html>

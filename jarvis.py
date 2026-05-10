@@ -4,6 +4,7 @@ JARVIS - Voice Assistant
 Wake word: "Jarvis" (Whisper sliding window)
 Command:   Whisper small (local, fast)
 Voice:     Daniel (macOS TTS)
+HUD:       Iron Man overlay served on localhost:7474
 """
 
 import os
@@ -14,8 +15,10 @@ import struct
 import tempfile
 import subprocess
 import collections
+import threading
 import urllib.request
 import urllib.error
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import pyaudio
 import whisper
@@ -34,7 +37,8 @@ WAKE_WINDOW_SECONDS  = 2.0
 WAKE_SLIDE_CHUNKS    = 8
 FOLLOW_UP_SECONDS    = 4.0
 INPUT_DEVICE_INDEX   = 0
-MAX_HISTORY          = 10           # Max conversation turns to keep in memory
+MAX_HISTORY          = 10
+HUD_PORT             = 7474
 WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis"]
 WHISPER_HALLUCINATIONS = [
     "thank you", "thanks for watching", "thanks for listening",
@@ -45,6 +49,45 @@ WHISPER_HALLUCINATIONS = [
 ]
 
 WINDOW_CHUNKS = int(SAMPLE_RATE * WAKE_WINDOW_SECONDS / CHUNK)
+
+# ── Shared HUD state ──────────────────────────────────────────────────────────
+hud_state = {
+    "status": "idle",
+    "user_said": None,
+    "jarvis_said": None,
+    "wake_count": 0,
+    "query_count": 0,
+    "history_count": 0,
+    "cmd_count": 0,
+    "last_cmd": None,
+    "last_wake": None,
+    "weather_temp": None,
+    "weather_desc": None,
+}
+
+# ── HUD HTTP server ───────────────────────────────────────────────────────────
+class HUDHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass  # suppress access logs
+
+    def do_GET(self):
+        if self.path == '/state':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(hud_state).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_hud_server():
+    server = HTTPServer(('localhost', HUD_PORT), HUDHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+def open_hud():
+    hud_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hud_overlay.py")
+    subprocess.Popen(["python3", hud_path])
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 class C:
@@ -72,8 +115,10 @@ def chime():
     subprocess.Popen(["afplay", os.path.join(os.path.dirname(os.path.abspath(__file__)), "activate.wav")])
 
 def speak(text: str):
+    hud_state["status"] = "speaking"
     clean = text.replace("**","").replace("*","").replace("`","").replace("#","")
     subprocess.run(["say", "-v", TTS_VOICE, "-r", str(TTS_RATE), clean], check=False)
+    hud_state["status"] = "idle"
 
 def log(label: str, msg: str, color=C.CYAN):
     ts = time.strftime("%H:%M:%S")
@@ -97,6 +142,7 @@ def frames_to_wav(frames: list) -> str:
     return tmp_path
 
 def record_command(stream) -> str:
+    hud_state["status"] = "listening"
     frames = []
     silent_chunks = 0
     silent_limit = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK)
@@ -122,7 +168,6 @@ def is_hallucination(text: str) -> bool:
     t = text.lower().strip().strip(".,!?")
     if len(t) < 2:
         return True
-    # Filter non-ASCII (Chinese, Arabic, etc. hallucinations)
     if any(ord(c) > 127 for c in t):
         return True
     return any(h in t for h in WHISPER_HALLUCINATIONS)
@@ -139,8 +184,22 @@ def get_weather_brief() -> str:
     except:
         return "Weather unavailable."
 
+def get_weather_hud():
+    try:
+        url = "https://wttr.in/Seattle?format=j1"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.64.1"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            current = data["current_condition"][0]
+            temp_f = current["temp_F"]
+            desc = current["weatherDesc"][0]["value"]
+            hud_state["weather_temp"] = f"{temp_f}°F"
+            hud_state["weather_desc"] = desc
+    except:
+        hud_state["weather_temp"] = "--°F"
+        hud_state["weather_desc"] = "Unavailable"
+
 def startup_briefing():
-    """JARVIS gives a brief on boot: time + weather."""
     hour = int(time.strftime("%H"))
     if hour < 12:
         greeting = "Good morning"
@@ -148,15 +207,15 @@ def startup_briefing():
         greeting = "Good afternoon"
     else:
         greeting = "Good evening"
-
     weather = get_weather_brief()
     t = time.strftime("%I:%M %p").lstrip("0")
     briefing = f"{greeting}, Boss. It's {t}. {weather}. Systems are online and ready."
     log("🌅 BRIEFING", briefing, C.CYAN)
+    hud_state["jarvis_said"] = briefing
     speak(briefing)
 
 def query_jarvis(user_text: str, history: list) -> tuple:
-    """Returns (spoken_response, commands_list, calendar_days)."""
+    hud_state["status"] = "thinking"
     if not AWS_API_URL:
         return "API URL not configured.", [], None
     payload = json.dumps({"message": user_text, "history": history}).encode()
@@ -167,6 +226,7 @@ def query_jarvis(user_text: str, history: list) -> tuple:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
+            hud_state["query_count"] += 1
             return (
                 body.get("response", "No response."),
                 body.get("commands", []),
@@ -181,6 +241,8 @@ def run_command(command: str):
     try:
         subprocess.Popen(command, shell=True)
         log("⚙️  EXEC", command, C.YELLOW)
+        hud_state["cmd_count"] += 1
+        hud_state["last_cmd"] = command[:40]
     except Exception as e:
         log("❌ CMD ERROR", str(e), C.RED)
 
@@ -190,6 +252,14 @@ def main():
     if not AWS_API_URL:
         print(f"{C.YELLOW}⚠️  JARVIS_API_URL not set.{C.RESET}\n")
 
+    # Start HUD server and open browser
+    start_hud_server()
+    log("🖥️  HUD", f"Server running on http://localhost:{HUD_PORT}", C.CYAN)
+    open_hud()
+
+    # Fetch weather for HUD in background
+    threading.Thread(target=get_weather_hud, daemon=True).start()
+
     log("⏳ LOADING", "Whisper small model...", C.YELLOW)
     model = whisper.load_model(WHISPER_MODEL)
     log("✅ WHISPER", "Loaded.", C.GREEN)
@@ -197,7 +267,6 @@ def main():
     startup_briefing()
     print(f"\n{C.DIM}Listening for wake word...{C.RESET}\n")
 
-    # Session-level conversation history
     history = []
 
     pa = pyaudio.PyAudio()
@@ -242,6 +311,8 @@ def main():
             # ── Phase 2: Wake word detected ───────────────────────────────
             print(f"\n{C.CYAN}{'─'*50}{C.RESET}")
             log("⚡ ACTIVATED", f"Wake word: '{heard}'", C.CYAN)
+            hud_state["wake_count"] += 1
+            hud_state["last_wake"] = heard
             chime()
             ring.clear()
 
@@ -251,30 +322,35 @@ def main():
                 audio_path = record_command(stream)
 
                 log("🔍 TRANSCRIBING", "Running Whisper...", C.YELLOW)
+                hud_state["status"] = "thinking"
                 result = model.transcribe(audio_path, language="en", fp16=False,
                                           suppress_blank=True)
                 command = result["text"].strip()
                 os.unlink(audio_path)
 
                 if not command or is_hallucination(command):
+                    hud_state["status"] = "idle"
                     speak("I didn't catch that.")
                     break
 
                 log("🗣️  YOU SAID", command, C.GREEN)
+                hud_state["user_said"] = command
+
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
                 response, commands, calendar_days = query_jarvis(command, history)
 
                 log("🤖 JARVIS", response, C.CYAN)
+                hud_state["jarvis_said"] = response
 
                 if response.strip() == "SUIT_UP":
                     response = "Initializing suit assembly sequence, Boss."
+                    hud_state["jarvis_said"] = response
                     subprocess.Popen(["afplay", os.path.join(os.path.dirname(os.path.abspath(__file__)), "suitup.wav")])
                     speak(response)
                 else:
                     speak(response)
                     for cmd in commands:
-                        log("⚙️  EXEC", cmd, C.YELLOW)
-                        subprocess.Popen(cmd, shell=True)
+                        run_command(cmd)
                         time.sleep(0.5)
 
                 # Update history
@@ -282,15 +358,18 @@ def main():
                 history.append({"role": "assistant", "content": response})
                 if len(history) > MAX_HISTORY * 2:
                     history = history[-(MAX_HISTORY * 2):]
+                hud_state["history_count"] = len(history) // 2
 
                 # Wait for follow-up
                 log("🔁 WAITING", f"Listening for follow-up ({FOLLOW_UP_SECONDS:.0f}s)...", C.DIM)
+                hud_state["status"] = "idle"
                 if not wait_for_followup(stream):
                     log("💤 IDLE", "No follow-up. Back to wake word.", C.DIM)
                     break
 
             print(f"{C.CYAN}{'─'*50}{C.RESET}\n")
             print(f"{C.DIM}Listening for wake word...{C.RESET}\n")
+            hud_state["status"] = "idle"
             ring.clear()
 
     except KeyboardInterrupt:

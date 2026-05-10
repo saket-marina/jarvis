@@ -156,9 +156,9 @@ def startup_briefing():
     speak(briefing)
 
 def query_jarvis(user_text: str, history: list) -> tuple:
-    """Returns (spoken_response, command_or_None). Sends conversation history."""
+    """Returns (spoken_response, commands_list, calendar_days)."""
     if not AWS_API_URL:
-        return "API URL not configured.", None
+        return "API URL not configured.", [], None
     payload = json.dumps({"message": user_text, "history": history}).encode()
     req = urllib.request.Request(
         AWS_API_URL, data=payload,
@@ -167,11 +167,15 @@ def query_jarvis(user_text: str, history: list) -> tuple:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
-            return body.get("response", "No response."), body.get("command", None)
+            return (
+                body.get("response", "No response."),
+                body.get("commands", []),
+                body.get("calendar_days", None)
+            )
     except urllib.error.HTTPError as e:
-        return f"Backend error {e.code}.", None
+        return f"Backend error {e.code}.", [], None
     except Exception as e:
-        return f"Connection error: {e}", None
+        return f"Connection error: {e}", [], None
 
 def run_command(command: str):
     try:
@@ -258,18 +262,20 @@ def main():
 
                 log("🗣️  YOU SAID", command, C.GREEN)
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
-                response, shell_cmd = query_jarvis(command, history)
+                response, commands, calendar_days = query_jarvis(command, history)
 
                 log("🤖 JARVIS", response, C.CYAN)
+
                 if response.strip() == "SUIT_UP":
                     response = "Initializing suit assembly sequence, Boss."
                     subprocess.Popen(["afplay", os.path.join(os.path.dirname(os.path.abspath(__file__)), "suitup.wav")])
                     speak(response)
-                elif shell_cmd and not shell_cmd.startswith("FETCH_CALENDAR"):
-                    run_command(shell_cmd)
-                    speak(response)
                 else:
                     speak(response)
+                    for cmd in commands:
+                        log("⚙️  EXEC", cmd, C.YELLOW)
+                        subprocess.Popen(cmd, shell=True)
+                        time.sleep(0.5)
 
                 # Update history
                 history.append({"role": "user", "content": command})

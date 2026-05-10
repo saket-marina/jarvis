@@ -3,14 +3,14 @@
 ## Architecture
 
 ```
-"Yo Jarvis" (mic)
+"Jarvis" (mic)
       ↓
   jarvis.py  (Mac)
-  ├── Wake word → Google STT (free)
-  ├── Command  → Whisper (local, free)
-  └── Response → macOS `say` (free)
+  ├── Wake word → Whisper small (local, sliding window)
+  ├── Command  → Whisper small (local)
+  └── Response → macOS `say` Daniel voice
       ↓
-AWS API Gateway → Lambda → Anthropic Claude
+AWS API Gateway → Lambda → Amazon Bedrock (Claude Sonnet 4.5)
 ```
 
 ---
@@ -23,23 +23,40 @@ AWS API Gateway → Lambda → Anthropic Claude
 brew install portaudio ffmpeg
 ```
 
-### 2. Create a virtual environment
+### 2. Clone the repo
 
 ```bash
-cd jarvis/
+git clone https://github.com/YOUR_USERNAME/jarvis.git
+cd jarvis
+```
+
+### 3. Create a virtual environment
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. Install Python packages
+### 4. Install Python packages
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> Whisper will download the `base` model (~140MB) on first run.
+### 5. Download openWakeWord models
 
-### 4. Grant microphone access
+```bash
+python3 -c "from openwakeword.utils import download_models; download_models()"
+```
+
+### 6. Set your API URL permanently
+
+```bash
+echo 'export JARVIS_API_URL=https://YOUR_ID.execute-api.us-east-1.amazonaws.com/jarvis' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### 7. Grant microphone access
 
 Run the script once — macOS will prompt for mic permission. Grant it.
 
@@ -54,64 +71,64 @@ Run the script once — macOS will prompt for mic permission. Grant it.
 3. Settings:
    - Name: `jarvis-backend`
    - Runtime: `Python 3.11`
-   - Architecture: `x86_64`
 4. Click **Create function**
-5. In the **Code** tab, paste the contents of `lambda_function.py`
+5. Paste contents of `lambda_function.py` into the code editor
 6. Click **Deploy**
 
-### 2. Set environment variables
-
-In Lambda → Configuration → Environment variables:
-
-| Key | Value |
-|-----|-------|
-| `ANTHROPIC_API_KEY` | `sk-ant-...` (your Anthropic key) |
-
-### 3. Increase timeout
+### 2. Set timeout
 
 Configuration → General configuration → Edit → Timeout: **30 seconds**
+
+### 3. Give Lambda Bedrock access
+
+Configuration → Permissions → click the role name → Add permissions → Attach policies → `AmazonBedrockFullAccess`
 
 ### 4. Create API Gateway
 
 1. Go to [API Gateway Console](https://console.aws.amazon.com/apigateway)
-2. Click **Create API** → **HTTP API** → **Build**
-3. Add integration: **Lambda** → select `jarvis-backend`
+2. Create API → **HTTP API** → Build
+3. Add integration: Lambda → `jarvis-backend`
 4. Route: `POST /jarvis`
-5. Stage: `prod`
-6. Click **Create**
-7. Copy the **Invoke URL** — it looks like:
-   `https://abc123.execute-api.us-east-1.amazonaws.com/prod/jarvis`
+5. Stage: `prod` → Create
+6. Copy the **Invoke URL** and add `/jarvis` to the end
 
-### Free Tier Limits (more than enough)
+### Free Tier Limits
 - Lambda: 1M requests/month free
 - API Gateway: 1M calls/month free (first 12 months)
-- You only pay for Anthropic API usage (~$0.001/query with Haiku)
+- Bedrock: pay per token (~$0.003/query with Claude Sonnet 4.5)
 
 ---
 
-## Part 3: Connect & Run
-
-### 1. Set your API URL
+## Part 3: Run JARVIS
 
 ```bash
-export JARVIS_API_URL=https://abc123.execute-api.us-east-1.amazonaws.com/prod/jarvis
-```
-
-To make it permanent, add that line to `~/.zshrc` and run `source ~/.zshrc`.
-
-### 2. Run JARVIS
-
-```bash
+cd jarvis
 source venv/bin/activate
-python jarvis.py
+python3 jarvis.py
 ```
 
-### 3. Usage
+JARVIS will greet you with the time and weather, then listen for the wake word.
 
-- Say **"Yo Jarvis"** to wake it up
-- JARVIS will say "Yes?" 
-- Speak your command
-- Pause for ~1.5 seconds → it processes and responds
+---
+
+## Wake Word
+
+Say **"Jarvis"** clearly. JARVIS uses a sliding window so you only need to say it once. Common mishearings that also trigger it: Jervis, Javis, Davis, Travis.
+
+---
+
+## Capabilities
+
+| Command | Example |
+|---------|---------|
+| Open apps | "Open Safari" |
+| Open projects | "Open my jarvis project in VS Code" |
+| Spotify | "Play Telugu Gym Hype" / "Pause" / "Skip" |
+| Weather | "What's the weather?" |
+| Timers | "Set a timer for 10 minutes" |
+| Web search | "Search for AWS Lambda pricing" |
+| Volume | "Turn it up" / "Set volume to 50" |
+| Easter eggs | "Suit up" / "Are you there?" |
 
 ---
 
@@ -134,7 +151,7 @@ Create `~/Library/LaunchAgents/com.jarvis.plist`:
     <key>EnvironmentVariables</key>
     <dict>
         <key>JARVIS_API_URL</key>
-        <string>https://your-url.execute-api.us-east-1.amazonaws.com/prod/jarvis</string>
+        <string>https://your-url.execute-api.us-east-1.amazonaws.com/jarvis</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -156,7 +173,8 @@ launchctl load ~/Library/LaunchAgents/com.jarvis.plist
 | Problem | Fix |
 |---------|-----|
 | `PyAudio` install fails | `brew install portaudio` first |
-| Mic not working | System Preferences → Privacy → Microphone → allow Terminal |
-| Wake word not detected | Speak clearly; adjust `SILENCE_THRESHOLD` in `jarvis.py` |
+| Mic not working | System Settings → Privacy → Microphone → allow Terminal |
+| Wake word not detected | Speak clearly; check `SILENCE_THRESHOLD` in `jarvis.py` |
 | Lambda timeout | Increase timeout to 30s in Lambda config |
-| Whisper slow | Change model to `"tiny"` in `jarvis.py` for faster (less accurate) transcription |
+| Whisper slow | Change `WHISPER_MODEL` to `"tiny"` in `jarvis.py` |
+| "Thank you" phantom triggers | Already filtered — add new ones to `WHISPER_HALLUCINATIONS` in `jarvis.py` |

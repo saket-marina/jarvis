@@ -256,9 +256,15 @@ def main():
                 response, shell_cmd = query_jarvis(command, history)
 
                 log("🤖 JARVIS", response, C.CYAN)
-                if shell_cmd and not shell_cmd.startswith("FETCH_CALENDAR"):
+                if response.strip() == "SUIT_UP":
+                    response = "Initializing suit assembly sequence, Boss."
+                    subprocess.Popen(["afplay", os.path.join(os.path.dirname(os.path.abspath(__file__)), "suitup.wav")])
+                    speak(response)
+                elif shell_cmd and not shell_cmd.startswith("FETCH_CALENDAR"):
                     run_command(shell_cmd)
-                speak(response)
+                    speak(response)
+                else:
+                    speak(response)
 
                 # Update history
                 history.append({"role": "user", "content": command})

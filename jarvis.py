@@ -22,6 +22,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import pyaudio
 import whisper
+from google_tools import get_unread_emails, get_calendar_events
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AWS_API_URL          = os.environ.get("JARVIS_API_URL", "")
@@ -30,7 +31,7 @@ TTS_VOICE            = "Daniel"
 TTS_RATE             = 230
 SAMPLE_RATE          = 16000
 CHUNK                = 1024
-SILENCE_THRESHOLD    = 150
+SILENCE_THRESHOLD    = 500
 SILENCE_DURATION     = 1.2
 MAX_RECORD_SECONDS   = 30
 WAKE_WINDOW_SECONDS  = 2.0
@@ -39,7 +40,7 @@ FOLLOW_UP_SECONDS    = 4.0
 INPUT_DEVICE_INDEX   = 0
 MAX_HISTORY          = 10
 HUD_PORT             = 7474
-WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis"]
+WAKE_WORDS           = ["jarvis", "davis", "travis", "barvis", "jervis", "journey", "javis", "abyss", "j light"]
 WHISPER_HALLUCINATIONS = [
     "thank you", "thanks for watching", "thanks for listening",
     "please subscribe", ".", "..", "...", "bye", "goodbye",
@@ -353,6 +354,24 @@ def main():
 
                 log("🌐 QUERYING", "Sending to JARVIS backend...", C.YELLOW)
                 response, commands, calendar_days = query_jarvis(command, history)
+
+                # Handle calendar via Google API
+                if calendar_days:
+                    log("📅 CALENDAR", f"Reading calendar ({calendar_days} day(s))...", C.YELLOW)
+                    events = get_calendar_events(calendar_days)
+                    response, commands, _ = query_jarvis(
+                        f"My calendar events for the next {calendar_days} day(s): {events}. Summarize naturally in 1-2 sentences.",
+                        history
+                    )
+
+                # Handle email via Google API
+                if response.strip() == "FETCH_EMAIL":
+                    log("📧 EMAIL", "Reading Gmail...", C.YELLOW)
+                    emails = get_unread_emails(5)
+                    response, commands, _ = query_jarvis(
+                        f"My unread emails: {emails}. Summarize naturally in 2-3 sentences.",
+                        history
+                    )
 
                 log("🤖 JARVIS", response, C.CYAN)
                 hud_state["jarvis_said"] = response

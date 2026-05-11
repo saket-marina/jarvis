@@ -92,13 +92,22 @@ TOOLS = [
     },
     {
         "name": "get_calendar",
-        "description": "Read calendar events from macOS Calendar.",
+        "description": "Read calendar events from Google Calendar.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "description": "Days to look ahead. 1=today, 2=tomorrow too, 7=this week."}
             },
             "required": ["days"]
+        }
+    },
+    {
+        "name": "get_email",
+        "description": "Get unread email summary from Gmail. Use when user asks about email, inbox, or messages.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 ]
@@ -161,6 +170,7 @@ def call_claude(user_message: str, history: list) -> dict:
     commands = []
     calendar_days = None
     weather_tool_id = None
+    shell_command = None
 
     for block in result.get("content", []):
         if block.get("type") != "tool_use":
@@ -194,7 +204,15 @@ def call_claude(user_message: str, history: list) -> dict:
                 "content": "FETCH_CALENDAR"
             })
 
-    if commands and not calendar_days and not weather_tool_id:
+        elif name == "get_email":
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": "FETCH_EMAIL"
+            })
+            shell_command = "FETCH_EMAIL"
+
+    if commands and not calendar_days and not weather_tool_id and shell_command != "FETCH_EMAIL":
         spoken = " ".join(c["spoken_response"] for c in commands)
         return {
             "response": spoken,
@@ -218,6 +236,8 @@ def call_claude(user_message: str, history: list) -> dict:
     }
     if calendar_days:
         response["calendar_days"] = calendar_days
+    if shell_command == "FETCH_EMAIL":
+        response["response"] = "FETCH_EMAIL"
 
     return response
 

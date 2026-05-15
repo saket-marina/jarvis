@@ -43,7 +43,7 @@ SYSTEM KNOWLEDGE:
   - "Teri Ma": spotify:playlist:1mVud8kKo1G8R2NVxDDA3W
   - "My Telugu": spotify:playlist:5HGxmx0FoeF4d8df506fTZ
   - "Telugu Gym Hype": spotify:playlist:4EeAEFFoHRAt9Xu1srQ9UP
-  - Play: osascript -e 'tell application "Spotify" to play track "spotify:playlist:ID"'
+  - Play: osascript -e 'tell ap\plication "Spotify" to play track "spotify:playlist:ID"'
   - Pause: osascript -e 'tell application "Spotify" to pause'
   - Skip: osascript -e 'tell application "Spotify" to next track'
 - Timers: osascript -e 'delay SECONDS' -e 'display notification "Timer done!" with title "JARVIS"' &

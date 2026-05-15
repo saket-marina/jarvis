@@ -31,7 +31,7 @@ TTS_VOICE            = "Daniel"
 TTS_RATE             = 230
 SAMPLE_RATE          = 16000
 CHUNK                = 1024
-SILENCE_THRESHOLD    = 500
+SILENCE_THRESHOLD    = 1500
 SILENCE_DURATION     = 1.2
 MAX_RECORD_SECONDS   = 30
 WAKE_WINDOW_SECONDS  = 2.0
@@ -302,7 +302,10 @@ def main():
 
             chunks_since_last_check = 0
 
-            if _rms(b"".join(ring)) < SILENCE_THRESHOLD:
+            # Require sustained speech (not just a spike) before running Whisper
+            window_data = list(ring)
+            loud_chunks = sum(1 for c in window_data if _rms(c) > SILENCE_THRESHOLD)
+            if loud_chunks < 4:  # at least ~0.25s of sustained speech
                 continue
 
             clip_path = frames_to_wav(list(ring))
